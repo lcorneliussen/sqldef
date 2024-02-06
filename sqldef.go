@@ -42,9 +42,6 @@ func Run(generatorMode schema.GeneratorMode, db database.Database, sqlParser dat
 			fmt.Printf("-- No table exists --\n")
 		} else {
 			ddls, err := schema.ParseDDLs(generatorMode, sqlParser, currentDDLs, defaultSchema)
-			if err != nil {
-				log.Fatal(err)
-			}
 			ddls = schema.FilterTables(ddls, options.Config)
 			for i, ddl := range ddls {
 				if i > 0 {
@@ -52,6 +49,9 @@ func Run(generatorMode schema.GeneratorMode, db database.Database, sqlParser dat
 				}
 				fmt.Printf("%s;\n", ddl.Statement())
 				fmt.Print(ddlSuffix)
+			}
+			if err != nil {
+				log.Fatal(err)
 			}
 		}
 		return
