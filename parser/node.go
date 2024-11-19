@@ -416,6 +416,7 @@ type DDL struct {
 	Type          *Type
 	Comment       *Comment
 	Extension     *Extension
+	Schema        *Schema
 }
 
 type DDLAction int
@@ -433,6 +434,7 @@ const (
 	CreateTrigger
 	CreateType
 	CreateView
+	CreateSchema
 )
 
 // View types
@@ -734,10 +736,11 @@ func (ct *ColumnType) Format(buf *nodeBuffer) {
 
 // IndexDefinition describes an index in a CREATE TABLE statement
 type IndexDefinition struct {
-	Info      *IndexInfo
-	Columns   []IndexColumn
-	Options   []*IndexOption
-	Partition *IndexPartition
+	Info              *IndexInfo
+	Columns           []IndexColumn
+	Options           []*IndexOption
+	Partition         *IndexPartition
+	ConstraintOptions *ConstraintOptions
 }
 
 // Format formats the node.
@@ -858,6 +861,7 @@ type ForeignKeyDefinition struct {
 	OnDelete          ColIdent
 	OnUpdate          ColIdent
 	NotForReplication bool
+	ConstraintOptions *ConstraintOptions
 }
 
 type Policy struct {
@@ -870,6 +874,10 @@ type Policy struct {
 }
 
 type Extension struct {
+	Name string
+}
+
+type Schema struct {
 	Name string
 }
 
@@ -1585,7 +1593,7 @@ func NewBoolSQLVal(in bool) *SQLVal {
 	return &SQLVal{Type: ValBool, Val: []byte(fmt.Sprintf("%t", in))}
 }
 
-// NewUnicode bulds a new UniodeStrVal.
+// NewUnicode builds a new UnicodeStrVal.
 func NewUnicodeStrVal(in []byte) *SQLVal {
 	return &SQLVal{Type: UnicodeStrVal, Val: in}
 }
@@ -1877,7 +1885,7 @@ func (node *ValuesFuncExpr) Format(buf *nodeBuffer) {
 // SubstrExpr represents a call to SubstrExpr(column, value_expression) or SubstrExpr(column, value_expression,value_expression)
 // also supported syntax SubstrExpr(column from value_expression for value_expression)
 type SubstrExpr struct {
-	Name Expr
+	Name SelectExpr
 	From Expr
 	To   Expr
 }
@@ -2079,7 +2087,7 @@ func (node *Order) Format(buf *nodeBuffer) {
 	buf.Printf("%v %s", node.Expr, node.Direction)
 }
 
-// PartitionBy represents a PARTITON BY clause.
+// PartitionBy represents a PARTITION BY clause.
 type PartitionBy []*Partition
 
 // Format formats the node.

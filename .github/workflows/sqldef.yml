@@ -39,10 +39,10 @@ jobs:
     steps:
       - uses: actions/setup-go@v5
         with:
-          go-version: 1.19
+          go-version: 1.21
       - uses: actions/checkout@v4
 
-      - run: docker-compose up -d
+      - run: docker compose up -d
         env:
           MYSQL_VERSION: ${{ matrix.mysql_version }}
           POSTGRES_VERSION: ${{ matrix.postgres_version }}
@@ -55,23 +55,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { GOOS: linux,   GOARCH: amd64, EXT: tar.gz, ZIG_TARGET: x86_64-linux }
-          - { GOOS: linux,   GOARCH: '386', EXT: tar.gz, ZIG_TARGET: i386-linux }
-          - { GOOS: linux,   GOARCH: arm64, EXT: tar.gz, ZIG_TARGET: aarch64-linux }
-          - { GOOS: linux,   GOARCH: arm,   EXT: tar.gz, ZIG_TARGET: arm-linux-musleabi }
-          - { GOOS: windows, GOARCH: amd64, EXT: zip,    ZIG_TARGET: x86_64-windows }
+          - { GOOS: linux,   GOARCH: amd64, EXT: tar.gz }
+          - { GOOS: linux,   GOARCH: '386', EXT: tar.gz }
+          - { GOOS: linux,   GOARCH: arm64, EXT: tar.gz }
+          - { GOOS: linux,   GOARCH: arm,   EXT: tar.gz }
+          - { GOOS: windows, GOARCH: amd64, EXT: zip }
     steps:
       - uses: actions/setup-go@v5
         with:
-          go-version: 1.19
+          go-version: 1.21
       - uses: actions/checkout@v4
 
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.9.1
       - name: make package-${{ matrix.EXT }}
         run: |
-          export "CC=zig cc -target ${{ matrix.ZIG_TARGET }}"
           make package-${{ matrix.EXT }} GOOS=${{ matrix.GOOS }} GOARCH=${{ matrix.GOARCH }}
 
       - name: Upload artifacts
@@ -91,7 +87,7 @@ jobs:
     steps:
       - uses: actions/setup-go@v5
         with:
-          go-version: 1.19
+          go-version: 1.21
       - uses: actions/checkout@v4
 
       - name: make package-${{ matrix.EXT }}
@@ -113,13 +109,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - { uses: actions/download-artifact@v3, with: { name: sqldef-linux-amd64,   path: package/ } }
-      - { uses: actions/download-artifact@v3, with: { name: sqldef-linux-386,     path: package/ } }
-      - { uses: actions/download-artifact@v3, with: { name: sqldef-linux-arm64,   path: package/ } }
-      - { uses: actions/download-artifact@v3, with: { name: sqldef-linux-arm,     path: package/ } }
-      - { uses: actions/download-artifact@v3, with: { name: sqldef-darwin-amd64,  path: package/ } }
-      - { uses: actions/download-artifact@v3, with: { name: sqldef-darwin-arm64,  path: package/ } }
-      - { uses: actions/download-artifact@v3, with: { name: sqldef-windows-amd64, path: package/ } }
+      - { uses: actions/download-artifact@v4, with: { name: sqldef-linux-amd64,   path: package/ } }
+      - { uses: actions/download-artifact@v4, with: { name: sqldef-linux-386,     path: package/ } }
+      - { uses: actions/download-artifact@v4, with: { name: sqldef-linux-arm64,   path: package/ } }
+      - { uses: actions/download-artifact@v4, with: { name: sqldef-linux-arm,     path: package/ } }
+      - { uses: actions/download-artifact@v4, with: { name: sqldef-darwin-amd64,  path: package/ } }
+      - { uses: actions/download-artifact@v4, with: { name: sqldef-darwin-arm64,  path: package/ } }
+      - { uses: actions/download-artifact@v4, with: { name: sqldef-windows-amd64, path: package/ } }
 
       - name: Release binaries
         run: |
@@ -140,7 +136,7 @@ jobs:
           set -x
           cd ./homebrew-sqldef
           VERSION=$(echo "$GITHUB_REF" | sed -e 's!refs/tags/!!')
-          sed -i -e "s/tag: '.*'/tag: '$VERSION'/" mysqldef.rb psqldef.rb
+          sed -i -e "s/tag: '.*'/tag: '$VERSION'/" mysqldef.rb psqldef.rb mssqldef.rb
           git add .
           if ! git diff-index --quiet HEAD --; then
             git config --global user.email "k0kubun@github.com"

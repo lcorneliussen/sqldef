@@ -39,7 +39,7 @@ Application Options:
       --enable-drop-table           Enable destructive changes such as DROP (enable only table drops)
       --skip-view                   Skip managing views (temporary feature, to be removed later)
       --before-apply=               Execute the given string before applying the regular DDLs
-      --config=                     YAML file to specify: target_tables, skip_tables
+      --config=                     YAML file to specify: target_tables, skip_tables, algorithm, lock
       --help                        Show this help
       --version                     Show this version
 ```
@@ -97,11 +97,11 @@ Run: 'ALTER TABLE user ADD INDEX index_name(name);'
 $ mysqldef -uroot test < schema.sql
 Nothing is modified
 
-# Run without droping existing tables and columns
+# Run without dropping existing tables and columns
 $ mysqldef -uroot test < schema.sql
 Skipped: 'DROP TABLE users;'
 
-# Run droping existing tables and columns
+# Run dropping existing tables and columns
 $ mysqldef -uroot test --enable-drop-table < schema.sql
 Run: 'DROP TABLE users;'
 
@@ -197,11 +197,11 @@ Run: 'ALTER TABLE users DROP COLUMN name;'
 $ psqldef -U postgres test < schema.sql
 Nothing is modified
 
-# Run without droping existing tables and columns
+# Run without dropping existing tables and columns
 $ psqldef -U postgres test < schema.sql
 Skipped: 'DROP TABLE users;'
 
-# Run droping existing tables and columns
+# Run dropping existing tables and columns
 $ psqldef -U postgres test --enable-drop-table < schema.sql
 Run: 'DROP TABLE users;'
 ```

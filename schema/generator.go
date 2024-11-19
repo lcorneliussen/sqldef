@@ -53,7 +53,13 @@ type Generator struct {
 	desiredExtensions []*Extension
 	currentExtensions []*Extension
 
+	desiredSchemas []*Schema
+	currentSchemas []*Schema
+
 	defaultSchema string
+
+	algorithm string
+	lock      string
 }
 
 // Parse argument DDLs and call `generateDDLs()`
@@ -71,7 +77,7 @@ func GenerateIdempotentDDLs(mode GeneratorMode, sqlParser database.Parser, desir
 	}
 	currentDDLs = FilterTables(currentDDLs, config)
 
-	tables, views, triggers, types, comments, extensions, err := aggregateDDLsToSchema(currentDDLs)
+	tables, views, triggers, types, comments, extensions, schemas, err := aggregateDDLsToSchema(currentDDLs)
 	if err != nil {
 		return nil, err
 	}
@@ -89,14 +95,25 @@ func GenerateIdempotentDDLs(mode GeneratorMode, sqlParser database.Parser, desir
 		currentComments:   comments,
 		desiredExtensions: []*Extension{},
 		currentExtensions: extensions,
+		desiredSchemas:    []*Schema{},
+		currentSchemas:    schemas,
 		defaultSchema:     defaultSchema,
+		algorithm:         config.Algorithm,
+		lock:              config.Lock,
 	}
 	return generator.generateDDLs(desiredDDLs)
 }
 
 // Main part of DDL genearation
 func (g *Generator) generateDDLs(desiredDDLs []DDL) ([]string, error) {
-	ddls := []string{}
+	// These variables are used to control the output order of the DDL.
+	// `CREATE SCHEMA` should execute first, and DDLs that add indexes and foreign keys should execute last.
+	// Other ddls are stored in interDDLs.
+	createExtensionDDLs := []string{}
+	createSchemaDDLs := []string{}
+	interDDLs := []string{}
+	indexDDLs := []string{}
+	foreignKeyDDLs := []string{}
 
 	// Incrementally examine desiredDDLs
 	for _, ddl := range desiredDDLs {
@@ -106,76 +123,89 @@ func (g *Generator) generateDDLs(desiredDDLs []DDL) ([]string, error) {
 				// Table already exists, guess required DDLs.
 				tableDDLs, err := g.generateDDLsForCreateTable(*currentTable, *desired)
 				if err != nil {
-					return ddls, err
+					return nil, err
 				}
-				ddls = append(ddls, tableDDLs...)
+				interDDLs = append(interDDLs, tableDDLs...)
 				mergeTable(currentTable, desired.table)
 			} else {
 				// Table not found, create table.
-				ddls = append(ddls, desired.statement)
+				interDDLs = append(interDDLs, desired.statement)
 				table := desired.table // copy table
 				g.currentTables = append(g.currentTables, &table)
 			}
 			table := desired.table // copy table
 			g.desiredTables = append(g.desiredTables, &table)
 		case *CreateIndex:
-			indexDDLs, err := g.generateDDLsForCreateIndex(desired.tableName, desired.index, "CREATE INDEX", ddl.Statement())
+			idxDDLs, err := g.generateDDLsForCreateIndex(desired.tableName, desired.index, "CREATE INDEX", ddl.Statement())
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, indexDDLs...)
+			indexDDLs = append(indexDDLs, idxDDLs...)
 		case *AddIndex:
-			indexDDLs, err := g.generateDDLsForCreateIndex(desired.tableName, desired.index, "ALTER TABLE", ddl.Statement())
+			idxDDLs, err := g.generateDDLsForCreateIndex(desired.tableName, desired.index, "ALTER TABLE", ddl.Statement())
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, indexDDLs...)
+			indexDDLs = append(indexDDLs, idxDDLs...)
 		case *AddForeignKey:
 			fkeyDDLs, err := g.generateDDLsForAddForeignKey(desired.tableName, desired.foreignKey, "ALTER TABLE", ddl.Statement())
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, fkeyDDLs...)
+			foreignKeyDDLs = append(foreignKeyDDLs, fkeyDDLs...)
 		case *AddPolicy:
 			policyDDLs, err := g.generateDDLsForCreatePolicy(desired.tableName, desired.policy, "CREATE POLICY", ddl.Statement())
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, policyDDLs...)
+			interDDLs = append(interDDLs, policyDDLs...)
 		case *View:
 			viewDDLs, err := g.generateDDLsForCreateView(desired.name, desired)
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, viewDDLs...)
+			interDDLs = append(interDDLs, viewDDLs...)
 		case *Trigger:
 			triggerDDLs, err := g.generateDDLsForCreateTrigger(desired.name, desired)
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, triggerDDLs...)
+			interDDLs = append(interDDLs, triggerDDLs...)
 		case *Type:
 			typeDDLs, err := g.generateDDLsForCreateType(desired)
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, typeDDLs...)
+			interDDLs = append(interDDLs, typeDDLs...)
 		case *Comment:
 			commentDDLs, err := g.generateDDLsForComment(desired)
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, commentDDLs...)
+			interDDLs = append(interDDLs, commentDDLs...)
 		case *Extension:
 			extensionDDLs, err := g.generateDDLsForExtension(desired)
 			if err != nil {
-				return ddls, err
+				return nil, err
 			}
-			ddls = append(ddls, extensionDDLs...)
+			createExtensionDDLs = append(createExtensionDDLs, extensionDDLs...)
+		case *Schema:
+			schemaDDLs, err := g.generateDDLsForSchema(desired)
+			if err != nil {
+				return nil, err
+			}
+			createSchemaDDLs = append(createSchemaDDLs, schemaDDLs...)
 		default:
 			return nil, fmt.Errorf("unexpected ddl type in generateDDLs: %v", desired)
 		}
 	}
+
+	ddls := []string{}
+	ddls = append(ddls, createExtensionDDLs...)
+	ddls = append(ddls, createSchemaDDLs...)
+	ddls = append(ddls, interDDLs...)
+	ddls = append(ddls, indexDDLs...)
+	ddls = append(ddls, foreignKeyDDLs...)
 
 	// Clean up obsoleted tables, indexes, columns
 	for _, currentTable := range g.currentTables {
@@ -257,6 +287,10 @@ func (g *Generator) generateDDLs(desiredDDLs []DDL) ([]string, error) {
 		if containsString(convertViewNames(g.desiredViews), currentView.name) {
 			continue
 		}
+		if currentView.viewType == "MATERIALIZED VIEW" {
+			ddls = append(ddls, fmt.Sprintf("DROP MATERIALIZED VIEW %s", g.escapeTableName(currentView.name)))
+			continue
+		}
 		ddls = append(ddls, fmt.Sprintf("DROP VIEW %s", g.escapeTableName(currentView.name)))
 	}
 
@@ -277,6 +311,22 @@ func (g *Generator) generateDDLs(desiredDDLs []DDL) ([]string, error) {
 		if desitedTrigger == nil {
 			ddls = append(ddls, fmt.Sprintf("DROP TRIGGER %s", g.escapeSQLName(currentTrigger.name)))
 			continue
+		}
+	}
+
+	if isValidAlgorithm(g.algorithm) {
+		for i := range ddls {
+			if strings.HasPrefix(ddls[i], "ALTER TABLE") {
+				ddls[i] += ", ALGORITHM=" + strings.ToUpper(g.algorithm)
+			}
+		}
+	}
+
+	if isValidLock(g.lock) {
+		for i := range ddls {
+			if strings.HasPrefix(ddls[i], "ALTER TABLE") {
+				ddls[i] += ", LOCK=" + strings.ToUpper(g.lock)
+			}
 		}
 	}
 
@@ -457,6 +507,12 @@ func (g *Generator) generateDDLsForCreateTable(currentTable Table, desired Creat
 
 				// TODO: support adding a column's `references`
 			case GeneratorModeMssql:
+				if !g.haveSameDataType(*currentColumn, desiredColumn) {
+					// Change type
+					ddl := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s", g.escapeTableName(desired.table.name), g.escapeSQLName(currentColumn.name), generateDataType(desiredColumn))
+					ddls = append(ddls, ddl)
+				}
+
 				if !areSameCheckDefinition(currentColumn.check, desiredColumn.check) {
 					_, tableName := splitTableName(desired.table.name, g.defaultSchema)
 					constraintName := fmt.Sprintf("%s_%s_check", tableName, desiredColumn.name)
@@ -594,7 +650,7 @@ func (g *Generator) generateDDLsForCreateTable(currentTable Table, desired Creat
 
 	// Examine each foreign key
 	for _, desiredForeignKey := range desired.table.foreignKeys {
-		if len(desiredForeignKey.constraintName) == 0 {
+		if len(desiredForeignKey.constraintName) == 0 && g.mode != GeneratorModeSQLite3 {
 			return ddls, fmt.Errorf(
 				"Foreign key without constraint symbol was found in table '%s' (index name: '%s', columns: %v). "+
 					"Specify the constraint symbol to identify the foreign key.",
@@ -614,7 +670,7 @@ func (g *Generator) generateDDLsForCreateTable(currentTable Table, desired Creat
 				default:
 				}
 				if dropDDL != "" {
-					ddls = append(ddls, dropDDL, fmt.Sprintf("ALTER TABLE %s ADD %s", g.escapeTableName(desired.table.name), g.generateForeignKeyDefinition(desiredForeignKey)))
+					ddls = append(ddls, dropDDL, fmt.Sprintf("ALTER TABLE %s ADD %s%s", g.escapeTableName(desired.table.name), g.generateForeignKeyDefinition(desiredForeignKey), g.generateConstraintOptions(desiredForeignKey.constraintOptions)))
 				}
 			}
 		} else {
@@ -657,10 +713,6 @@ func (g *Generator) generateDDLsForCreateIndex(tableName string, desiredIndex In
 	currentTable := findTableByName(g.currentTables, tableName)
 	if currentTable == nil { // Views
 		currentView := findViewByName(g.currentViews, tableName)
-		if currentView == nil {
-			return nil, fmt.Errorf("%s is performed for inexistent table '%s': '%s'", action, tableName, statement)
-		}
-
 		currentIndex := findIndexByName(currentView.indexes, desiredIndex.name)
 		if currentIndex == nil {
 			// Index not found, add index.
@@ -693,14 +745,7 @@ func (g *Generator) generateDDLsForCreateIndex(tableName string, desiredIndex In
 		}
 	}
 
-	// Examine indexes in desiredTable to delete obsoleted indexes later
 	desiredTable := findTableByName(g.desiredTables, tableName)
-	if desiredTable == nil {
-		return nil, fmt.Errorf("%s is performed before create table '%s': '%s'", action, tableName, statement)
-	}
-	if containsString(convertIndexesToIndexNames(desiredTable.indexes), desiredIndex.name) {
-		return nil, fmt.Errorf("index '%s' is doubly created against table '%s': '%s'", desiredIndex.name, tableName, statement)
-	}
 	desiredTable.indexes = append(desiredTable.indexes, desiredIndex)
 
 	return ddls, nil
@@ -710,15 +755,6 @@ func (g *Generator) generateDDLsForAddForeignKey(tableName string, desiredForeig
 	var ddls []string
 
 	currentTable := findTableByName(g.currentTables, tableName)
-	if currentTable == nil {
-		return nil, fmt.Errorf("%s is performed for inexistent table '%s': '%s'", action, tableName, statement)
-	}
-
-	referenceTable := findTableByName(g.currentTables, desiredForeignKey.referenceName)
-	if referenceTable == nil {
-		return nil, fmt.Errorf("%s is performed before create table '%s': '%s'", action, desiredForeignKey.referenceName, statement)
-	}
-
 	currentForeignKey := findForeignKeyByName(currentTable.foreignKeys, desiredForeignKey.constraintName)
 	if currentForeignKey == nil {
 		// Foreign Key not found, add foreign key
@@ -734,9 +770,6 @@ func (g *Generator) generateDDLsForAddForeignKey(tableName string, desiredForeig
 
 	// Examine indexes in desiredTable to delete obsoleted indexes later
 	desiredTable := findTableByName(g.desiredTables, tableName)
-	if desiredTable == nil {
-		return nil, fmt.Errorf("%s is performed before create table '%s': '%s'", action, tableName, statement)
-	}
 	if containsString(convertForeignKeysToConstraintNames(desiredTable.foreignKeys), desiredForeignKey.constraintName) {
 		return nil, fmt.Errorf("index '%s' is doubly created against table '%s': '%s'", desiredForeignKey.constraintName, tableName, statement)
 	}
@@ -779,6 +812,33 @@ func (g *Generator) generateDDLsForCreatePolicy(tableName string, desiredPolicy 
 	return ddls, nil
 }
 
+func (g *Generator) shouldDropAndCreateView(currentView *View, desiredView *View) bool {
+	if g.mode == GeneratorModeSQLite3 || g.mode == GeneratorModeMssql {
+		return true
+	}
+
+	// In the case of PostgreSQL, if there are any deletions or changes to columns,
+	// you cannot use REPLACE VIEW, so you need to DROP and CREATE VIEW.
+	//
+	// ref: https://www.postgresql.org/docs/current/sql-createview.html
+	//
+	// > CREATE OR REPLACE VIEW is similar, but if a view of the same name already exists, it is replaced.
+	// > The new query must generate the same columns that were generated by the existing view query
+	// > (that is, the same column names in the same order and with the same data types), but it may add additional
+	// > columns to the end of the list. The calculations giving rise to the output columns may be completely different.
+	if g.mode == GeneratorModePostgres {
+		// If columns are added, be sure to DROP and CREATE.
+		if len(currentView.columns) > len(desiredView.columns) {
+			return true
+		}
+
+		// If all existing columns are identical and only a new column is added, use REPLACE; otherwise, execute DROP and CREATE.
+		return !reflect.DeepEqual(currentView.columns, desiredView.columns[:len(currentView.columns)])
+	}
+
+	return false
+}
+
 func (g *Generator) generateDDLsForCreateView(viewName string, desiredView *View) ([]string, error) {
 	var ddls []string
 
@@ -791,7 +851,7 @@ func (g *Generator) generateDDLsForCreateView(viewName string, desiredView *View
 	} else if desiredView.viewType == "VIEW" { // TODO: Fix the definition comparison for materialized views and enable this
 		// View found. If it's different, create or replace view.
 		if g.normalizeViewDefinition(currentView.definition) != g.normalizeViewDefinition(desiredView.definition) {
-			if g.mode == GeneratorModeSQLite3 || g.mode == GeneratorModeMssql {
+			if g.shouldDropAndCreateView(currentView, desiredView) {
 				ddls = append(ddls, fmt.Sprintf("DROP %s %s", desiredView.viewType, g.escapeTableName(viewName)))
 				ddls = append(ddls, fmt.Sprintf("CREATE %s %s AS %s", desiredView.viewType, g.escapeTableName(viewName), desiredView.definition))
 			} else {
@@ -917,6 +977,21 @@ func (g *Generator) generateDDLsForExtension(desired *Extension) ([]string, erro
 	}
 
 	g.desiredExtensions = append(g.desiredExtensions, desired)
+
+	return ddls, nil
+}
+
+func (g *Generator) generateDDLsForSchema(desired *Schema) ([]string, error) {
+	ddls := []string{}
+
+	if currentSchema := findSchemaByName(g.currentSchemas, desired.schema.Name); currentSchema == nil {
+		// Schema not found, add schema.
+		ddls = append(ddls, desired.statement)
+		schema := *desired // copy schema
+		g.currentSchemas = append(g.currentSchemas, &schema)
+	}
+
+	g.desiredSchemas = append(g.desiredSchemas, desired)
 
 	return ddls, nil
 }
@@ -1101,6 +1176,7 @@ func (g *Generator) generateColumnDefinition(column Column, enableUnique bool) (
 	}
 
 	if column.comment != nil {
+		// TODO: Should this use StringConstant?
 		definition += fmt.Sprintf("COMMENT '%s' ", string(column.comment.raw))
 	}
 
@@ -1206,6 +1282,25 @@ func (g *Generator) generateAddIndex(table string, index Index) string {
 		ddl += fmt.Sprintf(" (%s)%s", strings.Join(columns, ", "), optionDefinition)
 		ddl += partition
 		return ddl
+	case GeneratorModePostgres:
+		ddl := fmt.Sprintf(
+			"ALTER TABLE %s ADD ",
+			g.escapeTableName(table),
+		)
+		if strings.ToUpper(index.indexType) == "UNIQUE KEY" {
+			ddl += "CONSTRAINT"
+		} else {
+			ddl += strings.ToUpper(index.indexType)
+		}
+		if !index.primary {
+			ddl += fmt.Sprintf(" %s", g.escapeSQLName(index.name))
+		}
+		if strings.ToUpper(index.indexType) == "UNIQUE KEY" {
+			ddl += " UNIQUE"
+		}
+		constraintOptions := g.generateConstraintOptions(index.constraintOptions)
+		ddl += fmt.Sprintf(" (%s)%s%s", strings.Join(columns, ", "), optionDefinition, constraintOptions)
+		return ddl
 	default:
 		ddl := fmt.Sprintf(
 			"ALTER TABLE %s ADD %s",
@@ -1216,7 +1311,8 @@ func (g *Generator) generateAddIndex(table string, index Index) string {
 		if !index.primary {
 			ddl += fmt.Sprintf(" %s", g.escapeSQLName(index.name))
 		}
-		ddl += fmt.Sprintf(" (%s)%s", strings.Join(columns, ", "), optionDefinition)
+		constraintOptions := g.generateConstraintOptions(index.constraintOptions)
+		ddl += fmt.Sprintf(" (%s)%s%s", strings.Join(columns, ", "), optionDefinition, constraintOptions)
 		return ddl
 	}
 }
@@ -1252,6 +1348,17 @@ func (g *Generator) generateIndexOptionDefinition(indexOptions []IndexOption) st
 		}
 	}
 	return optionDefinition
+}
+
+func (g *Generator) generateConstraintOptions(ConstraintOptions *ConstraintOptions) string {
+	if ConstraintOptions != nil && ConstraintOptions.deferrable {
+		if ConstraintOptions.initiallyDeferred {
+			return " DEFERRABLE INITIALLY DEFERRED"
+		} else {
+			return " DEFERRABLE INITIALLY IMMEDIATE"
+		}
+	}
+	return ""
 }
 
 func (g *Generator) generateForeignKeyDefinition(foreignKey ForeignKey) string {
@@ -1385,13 +1492,14 @@ func mergeTable(table1 *Table, table2 Table) {
 	}
 }
 
-func aggregateDDLsToSchema(ddls []DDL) ([]*Table, []*View, []*Trigger, []*Type, []*Comment, []*Extension, error) {
+func aggregateDDLsToSchema(ddls []DDL) ([]*Table, []*View, []*Trigger, []*Type, []*Comment, []*Extension, []*Schema, error) {
 	var tables []*Table
 	var views []*View
 	var triggers []*Trigger
 	var types []*Type
 	var comments []*Comment
 	var extensions []*Extension
+	var schemas []*Schema
 	for _, ddl := range ddls {
 		switch stmt := ddl.(type) {
 		case *CreateTable:
@@ -1402,7 +1510,7 @@ func aggregateDDLsToSchema(ddls []DDL) ([]*Table, []*View, []*Trigger, []*Type, 
 			if table == nil {
 				view := findViewByName(views, stmt.tableName)
 				if view == nil {
-					return nil, nil, nil, nil, nil, nil, fmt.Errorf("CREATE INDEX is performed before CREATE TABLE: %s", ddl.Statement())
+					return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("CREATE INDEX is performed before CREATE TABLE: %s", ddl.Statement())
 				}
 				// TODO: check duplicated creation
 				view.indexes = append(view.indexes, stmt.index)
@@ -1413,14 +1521,14 @@ func aggregateDDLsToSchema(ddls []DDL) ([]*Table, []*View, []*Trigger, []*Type, 
 		case *AddIndex:
 			table := findTableByName(tables, stmt.tableName)
 			if table == nil {
-				return nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD INDEX is performed before CREATE TABLE: %s", ddl.Statement())
+				return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD INDEX is performed before CREATE TABLE: %s", ddl.Statement())
 			}
 			// TODO: check duplicated creation
 			table.indexes = append(table.indexes, stmt.index)
 		case *AddPrimaryKey:
 			table := findTableByName(tables, stmt.tableName)
 			if table == nil {
-				return nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD PRIMARY KEY is performed before CREATE TABLE: %s", ddl.Statement())
+				return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD PRIMARY KEY is performed before CREATE TABLE: %s", ddl.Statement())
 			}
 
 			newColumns := []Column{}
@@ -1434,14 +1542,14 @@ func aggregateDDLsToSchema(ddls []DDL) ([]*Table, []*View, []*Trigger, []*Type, 
 		case *AddForeignKey:
 			table := findTableByName(tables, stmt.tableName)
 			if table == nil {
-				return nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD FOREIGN KEY is performed before CREATE TABLE: %s", ddl.Statement())
+				return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD FOREIGN KEY is performed before CREATE TABLE: %s", ddl.Statement())
 			}
 
 			table.foreignKeys = append(table.foreignKeys, stmt.foreignKey)
 		case *AddPolicy:
 			table := findTableByName(tables, stmt.tableName)
 			if table == nil {
-				return nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD POLICY performed before CREATE TABLE: %s", ddl.Statement())
+				return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("ADD POLICY performed before CREATE TABLE: %s", ddl.Statement())
 			}
 
 			table.policies = append(table.policies, stmt.policy)
@@ -1455,11 +1563,13 @@ func aggregateDDLsToSchema(ddls []DDL) ([]*Table, []*View, []*Trigger, []*Type, 
 			comments = append(comments, stmt)
 		case *Extension:
 			extensions = append(extensions, stmt)
+		case *Schema:
+			schemas = append(schemas, stmt)
 		default:
-			return nil, nil, nil, nil, nil, nil, fmt.Errorf("unexpected ddl type in convertDDLsToTablesAndViews: %#v", stmt)
+			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("unexpected ddl type in convertDDLsToTablesAndViews: %#v", stmt)
 		}
 	}
-	return tables, views, triggers, types, comments, extensions, nil
+	return tables, views, triggers, types, comments, extensions, schemas, nil
 }
 
 func findTableByName(tables []*Table, name string) *Table {
@@ -1565,6 +1675,15 @@ func findExtensionByName(extensions []*Extension, name string) *Extension {
 	for _, extension := range extensions {
 		if extension.extension.Name == name {
 			return extension
+		}
+	}
+	return nil
+}
+
+func findSchemaByName(schemas []*Schema, name string) *Schema {
+	for _, schema := range schemas {
+		if schema.schema.Name == name {
+			return schema
 		}
 	}
 	return nil
@@ -1815,6 +1934,9 @@ func (g *Generator) areSameIndexes(indexA Index, indexB Index) bool {
 	if indexA.constraint != indexB.constraint {
 		return false
 	}
+	if (indexA.constraintOptions != nil) != (indexB.constraintOptions != nil) {
+		return false
+	}
 	if indexA.constraintOptions != nil && indexB.constraintOptions != nil {
 		if indexA.constraintOptions.deferrable != indexB.constraintOptions.deferrable {
 			return false
@@ -1846,6 +1968,17 @@ func (g *Generator) areSameForeignKeys(foreignKeyA ForeignKey, foreignKeyB Forei
 	}
 	if foreignKeyA.notForReplication != foreignKeyB.notForReplication {
 		return false
+	}
+	if (foreignKeyA.constraintOptions != nil) != (foreignKeyB.constraintOptions != nil) {
+		return false
+	}
+	if foreignKeyA.constraintOptions != nil && foreignKeyB.constraintOptions != nil {
+		if foreignKeyA.constraintOptions.deferrable != foreignKeyB.constraintOptions.deferrable {
+			return false
+		}
+		if foreignKeyA.constraintOptions.initiallyDeferred != foreignKeyB.constraintOptions.initiallyDeferred {
+			return false
+		}
 	}
 	// TODO: check index, reference
 	return true
@@ -2038,7 +2171,7 @@ func (g *Generator) generateDefaultDefinition(defaultDefinition DefaultDefinitio
 		defaultVal := defaultDefinition.value
 		switch defaultVal.valueType {
 		case ValueTypeStr:
-			return fmt.Sprintf("DEFAULT '%s'", defaultVal.strVal), nil
+			return fmt.Sprintf("DEFAULT %s", StringConstant(defaultVal.strVal)), nil
 		case ValueTypeBool:
 			return fmt.Sprintf("DEFAULT %s", defaultVal.strVal), nil
 		case ValueTypeInt:
@@ -2142,4 +2275,27 @@ func splitTableName(table string, defaultSchema string) (string, string) {
 	} else {
 		return defaultSchema, table
 	}
+}
+
+func isValidAlgorithm(algorithm string) bool {
+	switch strings.ToUpper(algorithm) {
+	case "INPLACE", "COPY", "INSTANT":
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidLock(lock string) bool {
+	switch strings.ToUpper(lock) {
+	case "DEFAULT", "NONE", "SHARED", "EXCLUSIVE":
+		return true
+	default:
+		return false
+	}
+}
+
+// Escape a string and add quotes to form a legal SQL string constant.
+func StringConstant(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }

@@ -11,6 +11,7 @@ import (
 
 	_ "github.com/lib/pq"
 	"github.com/sqldef/sqldef/database"
+	schemaLib "github.com/sqldef/sqldef/schema"
 )
 
 const indent = "    "
@@ -36,6 +37,12 @@ func NewDatabase(config database.Config) (database.Database, error) {
 func (d *PostgresDatabase) DumpDDLs() (string, error) {
 	var ddls []string
 
+	schemaDDLs, err := d.schemas()
+	if err != nil {
+		return "", err
+	}
+	ddls = append(ddls, schemaDDLs...)
+
 	extensionDDLs, err := d.extensions()
 	if err != nil {
 		return "", err
@@ -52,14 +59,17 @@ func (d *PostgresDatabase) DumpDDLs() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, tableName := range tableNames {
-		ddl, err := d.dumpTableDDL(tableName)
-		if err != nil {
-			return "", err
-		}
 
-		ddls = append(ddls, ddl)
+	tableDDLs, err := database.ConcurrentMapFuncWithError(
+		tableNames,
+		d.config.DumpConcurrency,
+		func(tableName string) (string, error) {
+			return d.dumpTableDDL(tableName)
+		})
+	if err != nil {
+		return "", err
 	}
+	ddls = append(ddls, tableDDLs...)
 
 	viewDDLs, err := d.views()
 	if err != nil {
@@ -82,6 +92,7 @@ func (d *PostgresDatabase) tableNames() ([]string, error) {
 		inner join pg_catalog.pg_namespace n on c.relnamespace = n.oid
 		where n.nspname not in ('information_schema', 'pg_catalog')
 		and c.relkind in ('r', 'p')
+		and c.relpersistence in ('p', 'u')
 		and not exists (select * from pg_catalog.pg_depend d where c.oid = d.objid and d.deptype = 'e')
 		order by relname asc;
 	`)
@@ -96,7 +107,7 @@ func (d *PostgresDatabase) tableNames() ([]string, error) {
 		if err := rows.Scan(&schema, &name); err != nil {
 			return nil, err
 		}
-		if d.config.TargetSchema != "" && d.config.TargetSchema != schema {
+		if d.config.TargetSchema != nil && !containsString(d.config.TargetSchema, schema) {
 			continue
 		}
 		tables = append(tables, schema+"."+name)
@@ -188,6 +199,33 @@ func (d *PostgresDatabase) materializedViews() ([]string, error) {
 	return ddls, nil
 }
 
+func (d *PostgresDatabase) schemas() ([]string, error) {
+	rows, err := d.db.Query(`
+		SELECT schema_name
+		FROM information_schema.schemata
+		WHERE schema_name NOT LIKE 'pg_%%'
+		AND schema_name not in ('information_schema', 'public');
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ddls []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		ddls = append(
+			ddls, fmt.Sprintf(
+				"CREATE SCHEMA %s;", escapeSQLName(name),
+			),
+		)
+	}
+	return ddls, nil
+}
+
 func (d *PostgresDatabase) extensions() ([]string, error) {
 	if d.config.SkipExtension {
 		return []string{}, nil
@@ -219,11 +257,12 @@ func (d *PostgresDatabase) extensions() ([]string, error) {
 
 func (d *PostgresDatabase) types() ([]string, error) {
 	rows, err := d.db.Query(`
-		select t.typname, string_agg(e.enumlabel, ' ')
+		select n.nspname as type_schema, t.typname, string_agg(e.enumlabel, ' ')
 		from pg_enum e
 		join pg_type t on e.enumtypid = t.oid
+		inner join pg_catalog.pg_namespace n on t.typnamespace = n.oid
 		where not exists (select * from pg_depend d where d.objid = t.oid and d.deptype = 'e')
-		group by t.typname;
+		group by n.nspname, t.typname;
 	`)
 	if err != nil {
 		return nil, err
@@ -232,9 +271,12 @@ func (d *PostgresDatabase) types() ([]string, error) {
 
 	var ddls []string
 	for rows.Next() {
-		var typeName, labels string
-		if err := rows.Scan(&typeName, &labels); err != nil {
+		var typeSchema, typeName, labels string
+		if err := rows.Scan(&typeSchema, &typeName, &labels); err != nil {
 			return nil, err
+		}
+		if d.config.TargetSchema != nil && !containsString(d.config.TargetSchema, typeSchema) {
+			continue
 		}
 		enumLabels := []string{}
 		for _, label := range strings.Split(labels, " ") {
@@ -242,7 +284,7 @@ func (d *PostgresDatabase) types() ([]string, error) {
 		}
 		ddls = append(
 			ddls, fmt.Sprintf(
-				"CREATE TYPE %s AS ENUM (%s);", escapeSQLName(typeName), strings.Join(enumLabels, ", "),
+				"CREATE TYPE %s.%s AS ENUM (%s);", escapeSQLName(typeSchema), escapeSQLName(typeName), strings.Join(enumLabels, ", "),
 			),
 		)
 	}
@@ -625,7 +667,9 @@ func (d *PostgresDatabase) getForeignDefs(table string) ([]string, error) {
 			WHEN 'd' THEN 'SET DEFAULT'
 			WHEN 'r' THEN 'RESTRICT'
 			WHEN 'a' THEN 'NO ACTION'
-		END AS foreign_delete_rule
+		END AS foreign_delete_rule,
+		c.condeferrable AS deferrable,
+		c.condeferred AS initially_deferred
 	FROM pg_constraint      AS c
 	INNER JOIN pg_namespace AS nc ON nc.oid = c.connamespace
 	INNER JOIN pg_class     AS r1 ON r1.oid = c.conrelid
@@ -655,13 +699,15 @@ func (d *PostgresDatabase) getForeignDefs(table string) ([]string, error) {
 	type constraint struct {
 		tableSchema, constraintName, tableName, foreignTableSchema, foreignTableName, foreignUpdateRule, foreignDeleteRule string
 		columns, foreignColumns                                                                                            []string
+		deferrable, initiallyDeferred                                                                                      bool
 	}
 
 	constraints := make(map[identifier]constraint)
 
 	for rows.Next() {
 		var constraintSchema, tableSchema, constraintName, tableName, columnName, foreignTableSchema, foreignTableName, foreignColumnName, foreignUpdateRule, foreignDeleteRule string
-		err = rows.Scan(&constraintSchema, &tableSchema, &constraintName, &tableName, &columnName, &foreignTableSchema, &foreignTableName, &foreignColumnName, &foreignUpdateRule, &foreignDeleteRule)
+		var deferrable, initiallyDeferred bool
+		err = rows.Scan(&constraintSchema, &tableSchema, &constraintName, &tableName, &columnName, &foreignTableSchema, &foreignTableName, &foreignColumnName, &foreignUpdateRule, &foreignDeleteRule, &deferrable, &initiallyDeferred)
 		if err != nil {
 			return nil, err
 		}
@@ -670,6 +716,7 @@ func (d *PostgresDatabase) getForeignDefs(table string) ([]string, error) {
 			constraints[key] = constraint{
 				tableSchema, constraintName, tableName, foreignTableSchema, foreignTableName, foreignUpdateRule, foreignDeleteRule,
 				[]string{}, []string{},
+				deferrable, initiallyDeferred,
 			}
 		}
 		c := constraints[key]
@@ -697,10 +744,19 @@ func (d *PostgresDatabase) getForeignDefs(table string) ([]string, error) {
 		for i := range c.foreignColumns {
 			escapedForeignColumns = append(escapedForeignColumns, escapeSQLName(c.foreignColumns[i]))
 		}
+		var constraintOptions string
+		if c.deferrable {
+			if c.initiallyDeferred {
+				constraintOptions = " DEFERRABLE INITIALLY DEFERRED"
+			} else {
+				constraintOptions = " DEFERRABLE INITIALLY IMMEDIATE"
+			}
+		}
 		def := fmt.Sprintf(
-			"ALTER TABLE ONLY %s.%s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s.%s (%s) ON UPDATE %s ON DELETE %s",
+			"ALTER TABLE ONLY %s.%s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s.%s (%s) ON UPDATE %s ON DELETE %s%s",
 			escapeSQLName(c.tableSchema), escapeSQLName(c.tableName), escapeSQLName(c.constraintName), strings.Join(escapedColumns, ", "),
 			escapeSQLName(c.foreignTableSchema), escapeSQLName(c.foreignTableName), strings.Join(escapedForeignColumns, ", "), c.foreignUpdateRule, c.foreignDeleteRule,
+			constraintOptions,
 		)
 		defs = append(defs, def)
 	}
@@ -749,17 +805,19 @@ func (d *PostgresDatabase) getPolicyDefs(table string) ([]string, error) {
 }
 
 func (d *PostgresDatabase) getComments(table string) ([]string, error) {
-	_, table = splitTableName(table, d.GetDefaultSchema()) // supporting only public schema for now
+	schema, table := splitTableName(table, d.GetDefaultSchema())
 	var ddls []string
 
 	// Table comments
 	tableRows, err := d.db.Query(`
-		SELECT obj_description(oid)
-		FROM pg_class
-		WHERE relkind = 'r'
-		AND obj_description(oid) IS NOT NULL
-		AND relname = $1;
-	`, table)
+		SELECT obj_description(c.oid)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relkind = 'r'
+		AND obj_description(c.oid) IS NOT NULL
+		AND n.nspname = $1
+		AND c.relname = $2
+	`, schema, table)
 	if err != nil {
 		return nil, err
 	}
@@ -769,7 +827,7 @@ func (d *PostgresDatabase) getComments(table string) ([]string, error) {
 		if err := tableRows.Scan(&comment); err != nil {
 			return nil, err
 		}
-		ddls = append(ddls, fmt.Sprintf("COMMENT ON TABLE %s IS '%s';", table, comment))
+		ddls = append(ddls, fmt.Sprintf("COMMENT ON TABLE \"%s\".\"%s\" IS %s;", schema, table, schemaLib.StringConstant(comment)))
 	}
 
 	// Column comments
@@ -784,9 +842,10 @@ func (d *PostgresDatabase) getComments(table string) ([]string, error) {
 			pgd.objsubid   = c.ordinal_position and
 			c.table_schema = st.schemaname and
 			c.table_name   = st.relname and
-			st.relname = $1
+			c.table_schema = $1 and
+			st.relname = $2
 		);
-	`, table)
+	`, schema, table)
 	if err != nil {
 		return nil, err
 	}
@@ -796,7 +855,7 @@ func (d *PostgresDatabase) getComments(table string) ([]string, error) {
 		if err := columnRows.Scan(&columnName, &comment); err != nil {
 			return nil, err
 		}
-		ddls = append(ddls, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS '%s';", table, columnName, comment))
+		ddls = append(ddls, fmt.Sprintf("COMMENT ON COLUMN \"%s\".\"%s\".\"%s\" IS %s;", schema, table, columnName, schemaLib.StringConstant(comment)))
 	}
 
 	return ddls, nil
@@ -872,4 +931,13 @@ func splitTableName(table string, defaultSchema string) (string, string) {
 		table = schemaTable[1]
 	}
 	return schema, table
+}
+
+func containsString(strs []string, str string) bool {
+	for _, s := range strs {
+		if s == str {
+			return true
+		}
+	}
+	return false
 }

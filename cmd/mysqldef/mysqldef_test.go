@@ -451,6 +451,42 @@ func TestMysqldefChangeGenerateColumnGemerayedAlwaysAs(t *testing.T) {
 		`,
 	))
 	assertApplyOutput(t, createTable, nothingModified)
+
+	createTable = stripHeredoc(`
+		CREATE TABLE test_table (
+		  id int(11) NOT NULL AUTO_INCREMENT,
+		  test_value varchar(45) GENERATED ALWAYS AS ('test') VIRTUAL,
+		  test_expr varchar(45) GENERATED ALWAYS AS ((test_value / test_value) * 2) STORED NOT NULL,
+  		  data json NOT NULL,
+  		  name varchar(20) GENERATED ALWAYS AS (substr(` + "'" + `test_value` + "'" + `, 1, 2)) STORED NOT NULL,
+		  PRIMARY KEY (id)
+		);
+		`,
+	)
+	assertApplyOutput(t, createTable, applyPrefix+stripHeredoc(`
+		ALTER TABLE `+"`test_table`"+` DROP COLUMN `+"`name`"+`;
+		ALTER TABLE `+"`test_table`"+` ADD COLUMN `+"`name`"+` varchar(20) GENERATED ALWAYS AS (substr(`+"'"+`test_value`+"'"+`, 1, 2)) STORED NOT NULL AFTER `+"`data`"+`;
+		`,
+	))
+	assertApplyOutput(t, createTable, nothingModified)
+
+	createTable = stripHeredoc(`
+		CREATE TABLE test_table (
+		  id int(11) NOT NULL AUTO_INCREMENT,
+		  test_value varchar(45) GENERATED ALWAYS AS ('test') VIRTUAL,
+		  test_expr varchar(45) GENERATED ALWAYS AS ((test_value / test_value) * 2) STORED NOT NULL,
+  		  data json NOT NULL,
+  		  name varchar(20) GENERATED ALWAYS AS (substring(` + "'" + `test_value` + "'" + `, 2, 2)) STORED NOT NULL,
+		  PRIMARY KEY (id)
+		);
+		`,
+	)
+	assertApplyOutput(t, createTable, applyPrefix+stripHeredoc(`
+		ALTER TABLE `+"`test_table`"+` DROP COLUMN `+"`name`"+`;
+		ALTER TABLE `+"`test_table`"+` ADD COLUMN `+"`name`"+` varchar(20) GENERATED ALWAYS AS (substr(`+"'"+`test_value`+"'"+`, 2, 2)) STORED NOT NULL AFTER `+"`data`"+`;
+		`,
+	))
+	assertApplyOutput(t, createTable, nothingModified)
 }
 
 func TestMysqldefChangeEnumColumn(t *testing.T) {
@@ -1568,6 +1604,43 @@ func TestMysqldefExport(t *testing.T) {
 	assertEquals(t, out, ddls)
 }
 
+func TestMysqldefExportConcurrently(t *testing.T) {
+	resetTestDatabase()
+
+	ddls := "CREATE TABLE `users_1` (\n" +
+		"  `name` varchar(40) DEFAULT NULL\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=latin1;\n" +
+		"\n" +
+		"CREATE TABLE `users_2` (\n" +
+		"  `name` varchar(40) DEFAULT NULL\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=latin1;\n" +
+		"\n" +
+		"CREATE TABLE `users_3` (\n" +
+		"  `name` varchar(40) DEFAULT NULL\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=latin1;\n"
+	testutils.MustExecute("mysql", "-uroot", "mysqldef_test", "-e", ddls)
+
+	outputDefault := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--export")
+
+	writeFile("config.yml", "dump_concurrency: 0")
+	outputNoConcurrency := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--export", "--config", "config.yml")
+
+	writeFile("config.yml", "dump_concurrency: 1")
+	outputConcurrency1 := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--export", "--config", "config.yml")
+
+	writeFile("config.yml", "dump_concurrency: 10")
+	outputConcurrency10 := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--export", "--config", "config.yml")
+
+	writeFile("config.yml", "dump_concurrency: -1")
+	outputConcurrencyNoLimit := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--export", "--config", "config.yml")
+
+	assertEquals(t, outputDefault, ddls)
+	assertEquals(t, outputNoConcurrency, outputDefault)
+	assertEquals(t, outputConcurrency1, outputDefault)
+	assertEquals(t, outputConcurrency10, outputDefault)
+	assertEquals(t, outputConcurrencyNoLimit, outputDefault)
+}
+
 func TestMysqldefDropTable(t *testing.T) {
 	resetTestDatabase()
 	testutils.MustExecute("mysql", "-uroot", "mysqldef_test", "-e", stripHeredoc(`
@@ -1650,6 +1723,86 @@ func TestMysqldefConfigIncludesSkipTables(t *testing.T) {
 
 	apply := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--config", "config.yml", "--file", "schema.sql")
 	assertEquals(t, apply, nothingModified)
+}
+
+func TestMysqldefConfigIncludesAlgorithm(t *testing.T) {
+	resetTestDatabase()
+
+	createTable := stripHeredoc(`
+		CREATE TABLE users (
+		  id int UNSIGNED NOT NULL,
+		  name varchar(255) COLLATE utf8mb4_bin DEFAULT NULL
+		);
+		`,
+	)
+	assertApplyOutput(t, createTable, applyPrefix+createTable)
+	assertApplyOutput(t, createTable, nothingModified)
+
+	createTable = stripHeredoc(`
+		CREATE TABLE users (
+		  id int UNSIGNED NOT NULL,
+		  name varchar(1000) COLLATE utf8mb4_bin DEFAULT NULL
+		);
+		`,
+	)
+
+	writeFile("schema.sql", createTable)
+	writeFile("config.yml", "algorithm: |\n  inplace\n")
+
+	apply := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--config", "config.yml", "--file", "schema.sql")
+	assertEquals(t, apply, applyPrefix+stripHeredoc(`
+	ALTER TABLE `+"`users`"+` CHANGE COLUMN `+"`name` `name`"+` varchar(1000) COLLATE utf8mb4_bin DEFAULT null, ALGORITHM=INPLACE;
+	`,
+	))
+}
+
+func TestMysqldefConfigIncludesLock(t *testing.T) {
+	resetTestDatabase()
+
+	createTable := stripHeredoc(`
+		CREATE TABLE users (
+		  id int UNSIGNED NOT NULL,
+		  name varchar(255) COLLATE utf8mb4_bin DEFAULT NULL
+		);
+		`,
+	)
+	assertApplyOutput(t, createTable, applyPrefix+createTable)
+	assertApplyOutput(t, createTable, nothingModified)
+
+	createTable = stripHeredoc(`
+		CREATE TABLE users (
+		  id int UNSIGNED NOT NULL,
+		  name varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+		  new_column varchar(255) COLLATE utf8mb4_bin DEFAULT NULL
+		);
+		`,
+	)
+
+	writeFile("schema.sql", createTable)
+	writeFile("config.yml", "lock: none")
+
+	apply := assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--config", "config.yml", "--file", "schema.sql")
+	assertEquals(t, apply, applyPrefix+stripHeredoc(`
+	ALTER TABLE `+"`users`"+` ADD COLUMN `+"`new_column` "+`varchar(255) COLLATE utf8mb4_bin DEFAULT null `+"AFTER `name`, "+`LOCK=NONE;
+	`))
+
+	createTable = stripHeredoc(`
+		CREATE TABLE users (
+		  id int UNSIGNED NOT NULL,
+		  name varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+		  new_column varchar(1000) COLLATE utf8mb4_bin DEFAULT NULL
+		);
+		`,
+	)
+
+	writeFile("schema.sql", createTable)
+	writeFile("config.yml", "algorithm: inplace\nlock: none")
+
+	apply = assertedExecute(t, "./mysqldef", "-uroot", "mysqldef_test", "--config", "config.yml", "--file", "schema.sql")
+	assertEquals(t, apply, applyPrefix+stripHeredoc(`
+	ALTER TABLE `+"`users`"+` CHANGE COLUMN `+"`new_column` `new_column` "+`varchar(1000) COLLATE utf8mb4_bin DEFAULT null, ALGORITHM=INPLACE, LOCK=NONE;
+	`))
+
 }
 
 func TestMysqldefHelp(t *testing.T) {

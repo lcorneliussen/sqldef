@@ -2,13 +2,14 @@
 package database
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -27,13 +28,19 @@ type Config struct {
 	SslCa                      string
 
 	// Only PostgreSQL
-	TargetSchema string
+	TargetSchema []string
+
+	// Only MySQL and PostgreSQL
+	DumpConcurrency int
 }
 
 type GeneratorConfig struct {
-	TargetTables []string
-	SkipTables   []string
-	TargetSchema string
+	TargetTables    []string
+	SkipTables      []string
+	TargetSchema    []string
+	Algorithm       string
+	Lock            string
+	DumpConcurrency int
 }
 
 // Abstraction layer for multiple kinds of databases
@@ -94,11 +101,17 @@ func ParseGeneratorConfig(configFile string) GeneratorConfig {
 	}
 
 	var config struct {
-		TargetTables string `yaml:"target_tables"`
-		SkipTables   string `yaml:"skip_tables"`
-		TargetSchema string `yaml:"target_schema"`
+		TargetTables    string `yaml:"target_tables"`
+		SkipTables      string `yaml:"skip_tables"`
+		TargetSchema    string `yaml:"target_schema"`
+		Algorithm       string `yaml:"algorithm"`
+		Lock            string `yaml:"lock"`
+		DumpConcurrency int    `yaml:"dump_concurrency"`
 	}
-	err = yaml.UnmarshalStrict(buf, &config)
+
+	dec := yaml.NewDecoder(bytes.NewReader(buf))
+	dec.KnownFields(true)
+	err = dec.Decode(&config)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -113,14 +126,26 @@ func ParseGeneratorConfig(configFile string) GeneratorConfig {
 		skipTables = strings.Split(strings.Trim(config.SkipTables, "\n"), "\n")
 	}
 
-	var targetSchema string
+	var targetSchema []string
 	if config.TargetSchema != "" {
-		targetSchema = strings.Trim(config.TargetSchema, "\n")
+		targetSchema = strings.Split(strings.Trim(config.TargetSchema, "\n"), "\n")
 	}
 
+	var algorithm string
+	if config.Algorithm != "" {
+		algorithm = strings.Trim(config.Algorithm, "\n")
+	}
+
+	var lock string
+	if config.Lock != "" {
+		lock = strings.Trim(config.Lock, "\n")
+	}
 	return GeneratorConfig{
-		TargetTables: targetTables,
-		SkipTables:   skipTables,
-		TargetSchema: targetSchema,
+		TargetTables:    targetTables,
+		SkipTables:      skipTables,
+		TargetSchema:    targetSchema,
+		Algorithm:       algorithm,
+		Lock:            lock,
+		DumpConcurrency: config.DumpConcurrency,
 	}
 }

@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	pgquery "github.com/pganalyze/pg_query_go/v4"
+	pgquery "github.com/pganalyze/pg_query_go/v5"
 	"github.com/sqldef/sqldef/database"
 	"github.com/sqldef/sqldef/parser"
+	go_pgquery "github.com/wasilibs/go-pgquery"
 )
 
 type PostgresParser struct {
@@ -26,7 +27,7 @@ func (p PostgresParser) Parse(sql string) ([]database.DDLStatement, error) {
 	//re := regexp.MustCompilePOSIX("^ *--.*")
 	//sql = re.ReplaceAllString(sql, "")
 
-	result, err := pgquery.Parse(sql)
+	result, err := go_pgquery.Parse(sql)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +81,8 @@ func (p PostgresParser) parseStmt(node *pgquery.Node) (parser.Statement, error) 
 		return p.parseExtensionStmt(stmt.CreateExtensionStmt)
 	case *pgquery.Node_AlterTableStmt:
 		return p.parseAlterTableStmt(stmt.AlterTableStmt)
+	case *pgquery.Node_CreateSchemaStmt:
+		return p.parseCreateSchemaStmt(stmt.CreateSchemaStmt)
 	default:
 		return nil, fmt.Errorf("unknown node in parseStmt: %#v", stmt)
 	}
@@ -102,11 +105,14 @@ func (p PostgresParser) parseCreateStmt(stmt *pgquery.CreateStmt) (parser.Statem
 	for _, elt := range stmt.TableElts {
 		switch node := elt.Node.(type) {
 		case *pgquery.Node_ColumnDef:
-			column, err := p.parseColumnDef(node.ColumnDef)
+			column, foreignKey, err := p.parseColumnDef(node.ColumnDef, tableName)
 			if err != nil {
 				return nil, err
 			}
 			columns = append(columns, column)
+			if foreignKey != nil {
+				foreignKeys = append(foreignKeys, foreignKey)
+			}
 		case *pgquery.Node_Constraint:
 			var indexCols []parser.IndexColumn
 			for _, key := range node.Constraint.Keys {
@@ -139,6 +145,10 @@ func (p PostgresParser) parseCreateStmt(stmt *pgquery.CreateStmt) (parser.Statem
 					},
 					Columns: indexCols,
 					Options: []*parser.IndexOption{},
+					ConstraintOptions: &parser.ConstraintOptions{
+						Deferrable:        node.Constraint.Deferrable,
+						InitiallyDeferred: node.Constraint.Initdeferred,
+					},
 				}
 				indexes = append(indexes, index)
 			case pgquery.ConstrType_CONSTR_FOREIGN:
@@ -247,9 +257,20 @@ func (p PostgresParser) parseViewStmt(stmt *pgquery.ViewStmt) (parser.Statement,
 }
 
 func (p PostgresParser) parseSelectStmt(stmt *pgquery.SelectStmt) (parser.SelectStatement, error) {
-	if stmt.DistinctClause != nil || stmt.IntoClause != nil || stmt.WhereClause != nil || stmt.GroupClause != nil || stmt.HavingClause != nil ||
-		stmt.WindowClause != nil || stmt.ValuesLists != nil || stmt.SortClause != nil || stmt.LimitOffset != nil || stmt.LimitCount != nil ||
-		stmt.LimitOption != 1 || stmt.LockingClause != nil || stmt.WithClause != nil || stmt.Op != 1 || stmt.All != false || stmt.Larg != nil || stmt.Rarg != nil {
+	unhandled := stmt.IntoClause != nil ||
+		stmt.WindowClause != nil ||
+		stmt.SortClause != nil ||
+		stmt.ValuesLists != nil ||
+		stmt.LimitOffset != nil ||
+		stmt.LimitCount != nil ||
+		stmt.LimitOption != 1 ||
+		stmt.LockingClause != nil ||
+		stmt.WithClause != nil ||
+		stmt.Op != 1 ||
+		stmt.All ||
+		stmt.Larg != nil ||
+		stmt.Rarg != nil
+	if unhandled {
 		return nil, fmt.Errorf("unhandled node in parseSelectStmt: %#v", stmt)
 	}
 
@@ -290,8 +311,49 @@ func (p PostgresParser) parseSelectStmt(stmt *pgquery.SelectStmt) (parser.Select
 		}
 	}
 
+	var distinct string
+	if stmt.DistinctClause != nil {
+		distinct = parser.DistinctStr
+	}
+
+	var where *parser.Where
+	if stmt.WhereClause != nil {
+		expr, err := p.parseExpr(stmt.WhereClause)
+		if err != nil {
+			return nil, err
+		}
+		where = &parser.Where{
+			Type: parser.WhereStr,
+			Expr: expr,
+		}
+	}
+
+	var groupBy parser.GroupBy
+	if stmt.GroupClause != nil {
+		for _, group := range stmt.GroupClause {
+			expr, err := p.parseExpr(group)
+			if err != nil {
+				return nil, err
+			}
+			groupBy = append(groupBy, expr)
+		}
+	}
+
+	var having *parser.Where
+	if stmt.HavingClause != nil {
+		expr, err := p.parseExpr(stmt.HavingClause)
+		if err != nil {
+			return nil, err
+		}
+		having = &parser.Where{
+			Type: parser.HavingStr,
+			Expr: expr,
+		}
+	}
+
 	return &parser.Select{
 		SelectExprs: selectExprs,
+		Distinct:    distinct,
 		From: parser.TableExprs{
 			&parser.AliasedTableExpr{
 				Expr:       fromTable,
@@ -299,6 +361,9 @@ func (p PostgresParser) parseSelectStmt(stmt *pgquery.SelectStmt) (parser.Select
 				As:         parser.NewTableIdent(aliasName),
 			},
 		},
+		Where:   where,
+		GroupBy: groupBy,
+		Having:  having,
 	}, nil
 }
 
@@ -418,9 +483,13 @@ func (p PostgresParser) parseExpr(stmt *pgquery.Node) (parser.Expr, error) {
 	case *pgquery.Node_CaseExpr:
 		caseStmt := stmt.GetCaseExpr()
 
-		caseExpr, err := p.parseExpr(caseStmt.Arg)
-		if err != nil {
-			return nil, err
+		var caseExpr parser.Expr
+		var err error
+		if caseStmt.Arg != nil {
+			caseExpr, err = p.parseExpr(caseStmt.Arg)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		var whenExprs []*parser.When
@@ -598,6 +667,21 @@ func (p PostgresParser) parseExpr(stmt *pgquery.Node) (parser.Expr, error) {
 		default:
 			return nil, fmt.Errorf("unknown AExpr kind in parseExpr: %#v", node.AExpr)
 		}
+	case *pgquery.Node_CoalesceExpr:
+		var selectExprs parser.SelectExprs
+		for _, arg := range node.CoalesceExpr.Args {
+			expr, err := p.parseExpr(arg)
+			if err != nil {
+				return nil, err
+			}
+			selectExprs = append(selectExprs, &parser.AliasedExpr{
+				Expr: expr,
+			})
+		}
+		return &parser.FuncExpr{
+			Name:  parser.NewColIdent("coalesce"),
+			Exprs: selectExprs,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown node in parseExpr: %#v", node)
 	}
@@ -774,6 +858,10 @@ func (p PostgresParser) parseForeignKey(constraint *pgquery.Constraint) (*parser
 		ReferenceName:    refName,
 		OnDelete:         p.parseFkAction(constraint.FkDelAction),
 		OnUpdate:         p.parseFkAction(constraint.FkUpdAction),
+		ConstraintOptions: &parser.ConstraintOptions{
+			Deferrable:        constraint.Deferrable,
+			InitiallyDeferred: constraint.Initdeferred,
+		},
 	}, nil
 }
 
@@ -797,54 +885,104 @@ func (p PostgresParser) parseFkAction(action string) parser.ColIdent {
 	}
 }
 
-func (p PostgresParser) parseColumnDef(columnDef *pgquery.ColumnDef) (*parser.ColumnDefinition, error) {
+func (p PostgresParser) parseColumnDef(columnDef *pgquery.ColumnDef, tableName parser.TableName) (*parser.ColumnDefinition, *parser.ForeignKeyDefinition, error) {
 	if columnDef.Inhcount != 0 || columnDef.Identity != "" || columnDef.Generated != "" || columnDef.Storage != "" || columnDef.CollClause != nil {
-		return nil, fmt.Errorf("unhandled node in parseColumnDef: %#v", columnDef)
+		return nil, nil, fmt.Errorf("unhandled node in parseColumnDef: %#v", columnDef)
 	}
 
 	columnType, err := p.parseTypeName(columnDef.TypeName)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	var foreignKey *parser.ForeignKeyDefinition
 
 	for _, columnConstraint := range columnDef.Constraints {
 		constraint := columnConstraint.Node.(*pgquery.Node_Constraint).Constraint
 		switch constraint.Contype {
+		case pgquery.ConstrType_CONSTR_NULL:
+			columnType.NotNull = parser.NewBoolVal(false)
 		case pgquery.ConstrType_CONSTR_NOTNULL:
 			columnType.NotNull = parser.NewBoolVal(true)
 		case pgquery.ConstrType_CONSTR_DEFAULT:
 			defaultValue, err := p.parseDefaultValue(constraint.RawExpr)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			columnType.Default = defaultValue
 		case pgquery.ConstrType_CONSTR_CHECK:
 			check, err := p.parseCheckConstraint(constraint)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			columnType.Check = check
+			if constraint.Conname == "" {
+				name, truncated := p.absentConstraintName(tableName.Name.String(), columnDef.Colname, "check")
+				if truncated {
+					check.ConstraintName = parser.NewColIdent(name)
+				}
+			}
 		case pgquery.ConstrType_CONSTR_PRIMARY:
 			columnType.KeyOpt = parser.ColumnKeyOption(1)
 		case pgquery.ConstrType_CONSTR_UNIQUE:
 			columnType.KeyOpt = parser.ColumnKeyOption(3)
 		case pgquery.ConstrType_CONSTR_FOREIGN:
-			columnType.References = constraint.Pktable.Relname
-			for _, attr := range constraint.PkAttrs {
-				if node, ok := attr.Node.(*pgquery.Node_String_); ok {
-					column := parser.NewColIdent(node.String_.Sval)
-					columnType.ReferenceNames = append(columnType.ReferenceNames, column)
-				}
+			foreignKey, err = p.parseForeignKey(constraint)
+			if err != nil {
+				return nil, nil, err
+			}
+			foreignKey.IndexColumns = []parser.ColIdent{parser.NewColIdent(columnDef.Colname)}
+			if constraint.Conname == "" {
+				name, _ := p.absentConstraintName(tableName.Name.String(), columnDef.Colname, "fkey")
+				foreignKey.ConstraintName = parser.NewColIdent(name)
+			}
+		case pgquery.ConstrType_CONSTR_ATTR_DEFERRABLE:
+			foreignKey.ConstraintOptions.Deferrable = true
+		case pgquery.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE:
+			foreignKey.ConstraintOptions.Deferrable = false
+		case pgquery.ConstrType_CONSTR_ATTR_DEFERRED:
+			foreignKey.ConstraintOptions.InitiallyDeferred = true
+		case pgquery.ConstrType_CONSTR_ATTR_IMMEDIATE:
+			foreignKey.ConstraintOptions.InitiallyDeferred = false
+		case pgquery.ConstrType_CONSTR_GENERATED:
+			expr, err := p.parseExpr(constraint.RawExpr)
+			if err != nil {
+				return nil, nil, err
+			}
+			columnType.Generated = &parser.GeneratedColumn{
+				Expr: expr,
+				// Postgres only supports stored generated column
+				GeneratedType: "STORED",
 			}
 		default:
-			return nil, fmt.Errorf("unhandled contype: %d", constraint.Contype)
+			return nil, nil, fmt.Errorf("unhandled contype: %d", constraint.Contype)
 		}
 	}
 
 	return &parser.ColumnDefinition{
 		Name: parser.NewColIdent(columnDef.Colname),
 		Type: columnType,
-	}, nil
+	}, foreignKey, nil
+}
+
+func (p PostgresParser) absentConstraintName(tableName, columnName, suffix string) (string, bool) {
+	if name := fmt.Sprintf("%s_%s_%s", tableName, columnName, suffix); len(name) <= 63 {
+		return name, false
+	}
+
+	var tableThreshold, columnThreshold = 33 - len(suffix), 28
+	var maxSum = tableThreshold + columnThreshold
+
+	if len(tableName) <= tableThreshold {
+		columnName = columnName[:maxSum-len(tableName)]
+	} else if len(columnName) <= columnThreshold {
+		tableName = tableName[:maxSum-len(columnName)]
+	} else {
+		tableName = tableName[:tableThreshold]
+		columnName = columnName[:columnThreshold]
+	}
+
+	return fmt.Sprintf("%s_%s_%s", tableName, columnName, suffix), true
 }
 
 func (p PostgresParser) parseDefaultValue(rawExpr *pgquery.Node) (*parser.DefaultDefinition, error) {
@@ -911,7 +1049,7 @@ func (p PostgresParser) parseDefaultValue(rawExpr *pgquery.Node) (*parser.Defaul
 		default:
 			return nil, fmt.Errorf("unhandled default CollateExpr node: %#v", expr)
 		}
-	case *parser.FuncExpr:
+	case *parser.ComparisonExpr, *parser.FuncExpr:
 		return &parser.DefaultDefinition{
 			ValueOrExpression: parser.DefaultValueOrExpression{
 				Expr: expr,
@@ -941,40 +1079,48 @@ func (p PostgresParser) parseTypeName(node *pgquery.TypeName) (parser.ColumnType
 		}
 	}
 
-	if len(typeNames) == 1 {
-		columnType.Type = typeNames[0]
-	} else if len(typeNames) == 2 {
-		if typeNames[0] == "pg_catalog" {
-			switch typeNames[1] {
-			case "int2":
-				columnType.Type = "smallint"
-			case "int4":
-				columnType.Type = "integer"
-			case "int8":
-				columnType.Type = "bigint"
-			case "float4":
-				columnType.Type = "real"
-			case "float8":
-				columnType.Type = "double precision"
-			case "bool":
+	if len(typeNames) == 1 || (len(typeNames) == 2 && typeNames[0] == "pg_catalog") {
+		typeName := typeNames[len(typeNames)-1]
+		switch typeName {
+		case "int2":
+			columnType.Type = "smallint"
+		case "int4":
+			columnType.Type = "integer"
+		case "int8":
+			columnType.Type = "bigint"
+		case "float4":
+			columnType.Type = "real"
+		case "float8":
+			columnType.Type = "double precision"
+		case "bool":
+			if len(typeNames) == 1 {
+				// For test compatibility, keep bool as bool.
+				// TODO: Delete this exception.
+				columnType.Type = typeName
+			} else {
 				columnType.Type = "boolean"
-			case "bpchar":
-				columnType.Type = "character"
-			case "boolean", "varchar", "interval", "numeric", "timestamp", "time": // TODO: use this pattern more, fixing failed tests as well
-				columnType.Type = typeNames[1]
-			case "timetz":
-				columnType.Type = "time"
-				columnType.Timezone = true
-			case "timestamptz":
-				columnType.Type = "timestamp"
-				columnType.Timezone = true
-			default:
-				return columnType, fmt.Errorf("unhandled type in parseTypeName: %s", typeNames[1])
 			}
-		} else {
-			columnType.References = typeNames[0] + "."
-			columnType.Type = typeNames[1]
+		case "bpchar":
+			columnType.Type = "character"
+		case "boolean", "varchar", "interval", "numeric", "timestamp", "time": // TODO: use this pattern more, fixing failed tests as well
+			columnType.Type = typeName
+		case "timetz":
+			columnType.Type = "time"
+			columnType.Timezone = true
+		case "timestamptz":
+			columnType.Type = "timestamp"
+			columnType.Timezone = true
+		default:
+			if len(typeNames) == 2 {
+				return columnType, fmt.Errorf("unhandled type in parseTypeName: %s", typeName)
+			} else {
+				// TODO: Whitelist types explicitly. We're missing 'json' and 'text' at least.
+				columnType.Type = typeName
+			}
 		}
+	} else if len(typeNames) == 2 {
+		columnType.References = typeNames[0] + "."
+		columnType.Type = typeNames[1]
 	} else {
 		return columnType, fmt.Errorf("unexpected length in parseTypeName: %d", len(typeNames))
 	}
@@ -1046,6 +1192,15 @@ func (p PostgresParser) parseCheckConstraint(constraint *pgquery.Constraint) (*p
 	}, nil
 }
 
+func (p PostgresParser) parseCreateSchemaStmt(stmt *pgquery.CreateSchemaStmt) (parser.Statement, error) {
+	return &parser.DDL{
+		Action: parser.CreateSchema,
+		Schema: &parser.Schema{
+			Name: stmt.Schemaname,
+		},
+	}, nil
+}
+
 // This is a workaround to handle cases where PostgreSQL automatically adds or removes type casting.
 //
 // Example:
@@ -1081,7 +1236,15 @@ func shouldDeleteTypeCast(sourceNode *pgquery.Node, targetType parser.ColumnType
 			return false
 		}
 		// Delete type cast from '[0-9]'::text
-		return true
+		if targetType.Type == "text" {
+			return true
+		}
+		// Delete type cast from '2022-01-01'::date
+		if targetType.Type == "date" {
+			return true
+		}
+		// Do not delete type cast from '1 day'::interval
+		return false
 	case *pgquery.Node_AArrayExpr, *pgquery.Node_TypeCast:
 		// Delete type cast from ARRAY[1,2,3]::integer[]
 		return true

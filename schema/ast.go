@@ -132,6 +132,7 @@ type ForeignKey struct {
 	onDelete          string
 	onUpdate          string
 	notForReplication bool
+	constraintOptions *ConstraintOptions
 }
 
 type Policy struct {
@@ -151,6 +152,7 @@ type View struct {
 	name         string
 	definition   string
 	indexes      []Index
+	columns      []string
 }
 
 type Trigger struct {
@@ -264,6 +266,11 @@ type Extension struct {
 	extension parser.Extension
 }
 
+type Schema struct {
+	statement string
+	schema    parser.Schema
+}
+
 func (c *CreateTable) Statement() string {
 	return c.statement
 }
@@ -305,6 +312,10 @@ func (t *Comment) Statement() string {
 }
 
 func (t *Extension) Statement() string {
+	return t.statement
+}
+
+func (t *Schema) Statement() string {
 	return t.statement
 }
 

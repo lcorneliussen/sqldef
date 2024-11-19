@@ -1,3 +1,109 @@
+## v0.17.23
+
+* psqldef: Output CREATE EXTENSION first of DDL [#569](https://github.com/sqldef/sqldef/pull/569)
+
+## v0.17.22
+
+* mssqldef: Support ALTER COLUMN [#568](https://github.com/sqldef/sqldef/pull/568)
+* mssqldef: Support precision for numeric and decimal [#568](https://github.com/sqldef/sqldef/pull/568)
+
+## v0.17.21
+
+* psqldef: Mitigate the memory usage increase in v0.17.20 [#567](https://github.com/sqldef/sqldef/pull/567)
+
+## v0.17.20
+
+* psqldef: Support Windows [#564](https://github.com/sqldef/sqldef/pull/564)
+* mysqldef: Fix ALGORITHM option being overwritten by LOCK in config [#560](https://github.com/sqldef/sqldef/pull/560)
+
+## v0.17.19
+
+* mysqldef, psqldef: Add `dump_concurrency` option to `--config` [#556](https://github.com/sqldef/sqldef/pull/556)
+
+## v0.17.18
+
+- mysqldef: Fix the parser for substr and substring [#555](https://github.com/sqldef/sqldef/pull/555)
+
+## v0.17.17
+
+- psqldef: Fix target schema condition [#552](https://github.com/sqldef/sqldef/pull/552)
+
+## v0.17.16
+
+- psqldef: Handle truncated auto-generated check constraint names correctly [#547](https://github.com/sqldef/sqldef/pull/547)
+
+## v0.17.15
+
+- psqldef: Escape ' in strings [#546](https://github.com/sqldef/sqldef/pull/546)
+- psqldef: Recognize schema for types [#532](https://github.com/sqldef/sqldef/pull/532)
+
+## v0.17.14
+
+- psqldef: Treat 'timestamptz' the same as 'timestamp with time zone' [#545](https://github.com/sqldef/sqldef/pull/545)
+- psqldef: Support '+' operator with intervals in column DEFAULT expressions [#544](https://github.com/sqldef/sqldef/pull/544)
+
+## v0.17.13
+
+- psqldef: Fix create schema conditions [#543](https://github.com/sqldef/sqldef/pull/543)
+
+## v0.17.12
+
+- Allow multiple targets for target_schema config [#540](https://github.com/sqldef/sqldef/pull/540)
+- psqldef: Support CREATE SCHEMA [#541](https://github.com/sqldef/sqldef/pull/541)
+- psqldef: Output CREATE SCHEMA first of DDL [#542](https://github.com/sqldef/sqldef/pull/542)
+
+## v0.17.11
+
+- mysqldef: Add `lock` option to `--config` [#527](https://github.com/sqldef/sqldef/pull/527)
+
+## v0.17.10
+
+- psqldef: Fix the conditions for issuing REPLACE VIEW [#525](https://github.com/sqldef/sqldef/pull/525)
+
+## v0.17.9
+
+- psqldef: Fix the error when deleting columns from view [#523](https://github.com/sqldef/sqldef/pull/523)
+
+## v0.17.8
+
+- mysqldef: Add `algorithm` option to `--config` [#519](https://github.com/sqldef/sqldef/pull/519)
+
+## v0.17.7
+
+- psqldef: Exclude temporary tables on export [#512](https://github.com/sqldef/sqldef/pull/512)
+
+## v0.17.6
+
+- psqldef: Fix error for index with coalesce [#508](https://github.com/sqldef/sqldef/pull/508)
+
+## v0.17.5
+
+- Handle truncated auto generated constraint name correctly [#502](https://github.com/sqldef/sqldef/pull/502)
+
+## v0.17.4
+
+- Put the alter foreign key and index at the end of DDLs [#500](https://github.com/sqldef/sqldef/pull/500)
+
+## v0.17.3
+
+- psqldef: Support dropping MATERIALIZED VIEW [#499](https://github.com/sqldef/sqldef/pull/499)
+
+## v0.17.2
+
+- psqldef: Fix parser bugs introduced in v0.17.1 [#498](https://github.com/sqldef/sqldef/pull/498)
+
+## v0.17.1
+
+- psqldef: Enable adding an absent foreign key [#497](https://github.com/sqldef/sqldef/pull/497)
+- psqldef: Enhance `DEFERRABLE` support [#497](https://github.com/sqldef/sqldef/pull/497)
+
+## v0.17.0
+
+- psqldef: Support multiple schema for comment [#495](https://github.com/sqldef/sqldef/pull/495)
+- Remove some syntax ambiguities in the parser
+  - mysqldef: Some non-reserved keywords (e.g. `money`, `language`, `json`, ...) for MySQL became reserved for now.
+    This will be fixed to non-reserved keywords in future versions.
+
 ## v0.16.15
 
 - psqldef: Fix type cast errors [#481](https://github.com/sqldef/sqldef/pull/481)

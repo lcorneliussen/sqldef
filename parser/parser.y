@@ -2395,6 +2395,16 @@ foreign_key_without_options:
       ReferenceColumns: $12,
     }
   }
+/* For SQLite3 // SQLite Syntax: table-constraint https://www.sqlite.org/syntax/table-constraint.html */
+| FOREIGN KEY sql_id_opt '(' sql_id_list ')' REFERENCES table_name '(' sql_id_list ')'
+  {
+    $$ = &ForeignKeyDefinition{
+      IndexName: $3,
+      IndexColumns: $5,
+      ReferenceName: $8,
+      ReferenceColumns: $10,
+    }
+  }
 
 reference_option:
   RESTRICT
@@ -2424,6 +2434,16 @@ primary_key_definition:
       Partition: $10,
     }
   }
+/* For SQLite3 // SQLite Syntax: table-constraint https://www.sqlite.org/syntax/table-constraint.html */
+| PRIMARY KEY clustered_opt '(' index_column_list ')' index_option_opt index_partition_opt
+  {
+    $$ = &IndexDefinition{
+      Info: &IndexInfo{Type: string($1) + " " + string($2), Primary: true, Unique: true, Clustered: $3},
+      Columns: $5,
+      Options: $7,
+      Partition: $8,
+    }
+  }
 
 check_definition:
   CONSTRAINT sql_id CHECK openb expression closeb no_inherit_opt
@@ -2432,6 +2452,14 @@ check_definition:
       ConstraintName: $2,
       Where: *NewWhere(WhereStr, $5),
       NoInherit: $7,
+    }
+  }
+/* For SQLite3 // SQLite Syntax: table-options https://www.sqlite.org/syntax/table-options.html */
+| CHECK openb expression closeb no_inherit_opt
+  {
+    $$ = &CheckDefinition{
+      Where: *NewWhere(WhereStr, $3),
+      NoInherit: $5,
     }
   }
 
@@ -3419,27 +3447,35 @@ function_call_keyword:
   {
     $$ = &ConvertUsingExpr{Expr: $3, Type: $5}
   }
-| SUBSTR openb column_name ',' value_expression closeb
+| SUBSTR openb select_expression ',' value_expression closeb
   {
     $$ = &SubstrExpr{Name: $3, From: $5, To: nil}
   }
-| SUBSTR openb value_expression ',' value_expression ',' value_expression closeb
+| SUBSTR openb select_expression ',' value_expression ',' value_expression closeb
   {
     $$ = &SubstrExpr{Name: $3, From: $5, To: $7}
   }
-| SUBSTR openb column_name FROM value_expression FOR value_expression closeb
-  {
-    $$ = &SubstrExpr{Name: $3, From: $5, To: $7}
-  }
-| SUBSTRING openb column_name ',' value_expression closeb
+| SUBSTR openb select_expression FROM value_expression closeb
   {
     $$ = &SubstrExpr{Name: $3, From: $5, To: nil}
   }
-| SUBSTRING openb column_name ',' value_expression ',' value_expression closeb
+| SUBSTR openb select_expression FROM value_expression FOR value_expression closeb
   {
     $$ = &SubstrExpr{Name: $3, From: $5, To: $7}
   }
-| SUBSTRING openb column_name FROM value_expression FOR value_expression closeb
+| SUBSTRING openb select_expression ',' value_expression closeb
+  {
+    $$ = &SubstrExpr{Name: $3, From: $5, To: nil}
+  }
+| SUBSTRING openb select_expression ',' value_expression ',' value_expression closeb
+  {
+    $$ = &SubstrExpr{Name: $3, From: $5, To: $7}
+  }
+| SUBSTRING openb select_expression FROM value_expression closeb
+  {
+    $$ = &SubstrExpr{Name: $3, From: $5, To: nil}
+  }
+| SUBSTRING openb select_expression FROM value_expression FOR value_expression closeb
   {
     $$ = &SubstrExpr{Name: $3, From: $5, To: $7}
   }

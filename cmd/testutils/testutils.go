@@ -2,6 +2,7 @@
 package testutils
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -13,7 +14,7 @@ import (
 
 	"github.com/sqldef/sqldef/database"
 	"github.com/sqldef/sqldef/schema"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 type TestCase struct {
@@ -40,7 +41,9 @@ func ReadTests(pattern string) (map[string]TestCase, error) {
 			return nil, err
 		}
 
-		err = yaml.UnmarshalStrict(buf, &tests)
+		dec := yaml.NewDecoder(bytes.NewReader(buf))
+		dec.KnownFields(true)
+		err = dec.Decode(&tests)
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +92,7 @@ func RunTest(t *testing.T, db database.Database, test TestCase, mode schema.Gene
 		t.Fatal(err)
 	}
 	if len(ddls) > 0 {
-		t.Errorf("expected nothing is modifed, but got:\n```\n%s```", joinDDLs(ddls))
+		t.Errorf("expected nothing is modified, but got:\n```\n%s```", joinDDLs(ddls))
 	}
 
 	// Main test
@@ -121,7 +124,7 @@ func RunTest(t *testing.T, db database.Database, test TestCase, mode schema.Gene
 		t.Fatal(err)
 	}
 	if len(ddls) > 0 {
-		t.Errorf("expected nothing is modifed, but got:\n```\n%s```", joinDDLs(ddls))
+		t.Errorf("expected nothing is modified, but got:\n```\n%s```", joinDDLs(ddls))
 	}
 }
 
